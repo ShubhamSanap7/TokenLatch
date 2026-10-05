@@ -140,6 +140,10 @@ Run `setup.bat` again after setup:
 - If the guard is running, it asks whether to stop it and the access watcher.
 - Stop waits for both Python processes to exit, force-terminates only as a
   fallback, and verifies that their PIDs are gone before reporting success.
+- After a successful stop, the launcher removes `guard_config.json`, so the
+  next run opens the full setup wizard again. Vault data, encrypted state, and
+  logs are deliberately preserved; deleting those automatically could destroy
+  session storage that still needs recovery.
 - If the guard is stopped, it asks whether to start protection and repeats the
   selected-app close check.
 - `setup.bat --reconfigure` reruns the wizard.

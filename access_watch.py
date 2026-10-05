@@ -39,12 +39,13 @@ ACCESS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 def handle_shutdown(signum, frame):
     raise KeyboardInterrupt
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(ACCESS_LOG_FILE, encoding="utf-8")],
-)
 log = logging.getLogger("dguard.access")
+log.setLevel(logging.INFO)
+log.propagate = False
+if not log.handlers:
+    handler = logging.FileHandler(ACCESS_LOG_FILE, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.addHandler(handler)
 
 
 def write_pid_file():
@@ -317,7 +318,13 @@ def read_recent_events():
     try:
         return win32evtlog.EvtNext(query, 100, 0)
     finally:
-        win32evtlog.EvtClose(query)
+        # EvtClose is not exposed by every pywin32 build. The handle wrapper
+        # is released by Python in those builds, so do not turn a successful
+        # event read into a watcher failure just because the optional close
+        # function is unavailable.
+        close_event = getattr(win32evtlog, "EvtClose", None)
+        if close_event is not None:
+            close_event(query)
 
 
 def main():

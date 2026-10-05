@@ -197,6 +197,7 @@ if defined RUNNING_PID (
         if errorlevel 1 exit /b 1
         schtasks /Delete /F /TN "%TASK_NAME%" >nul 2>&1
         schtasks /Delete /F /TN "%ACCESS_TASK_NAME%" >nul 2>&1
+        call :reset_saved_setup
         echo %TOOL_NAME% stopped.
     ) else echo No changes made.
     exit /b 0
@@ -208,6 +209,7 @@ if defined ACCESS_RUNNING_PID (
     if /I "!STOP_IT!"=="Y" (
         call :stop_access_watch
         if errorlevel 1 exit /b 1
+        call :reset_saved_setup
         echo %TOOL_NAME% access watcher stopped.
     ) else echo No changes made.
     exit /b 0
@@ -341,7 +343,7 @@ exit /b 0
 set "RUNNING_PID="
 if not exist "%PID_FILE%" exit /b 0
 set /p "CHECK_PID="<"%PID_FILE%"
-for /f "delims=" %%P in ('powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -Filter 'ProcessId=!CHECK_PID!'; if($p -and $p.Name -ieq 'pythonw.exe' -and $p.CommandLine -match 'discord_guard\.pyw?') { 'yes' }" 2^>nul') do if /I "%%P"=="yes" set "RUNNING_PID=!CHECK_PID!"
+for /f "tokens=1" %%P in ('tasklist /FI "PID eq !CHECK_PID!" /NH 2^>nul') do if /I "%%P"=="pythonw.exe" set "RUNNING_PID=!CHECK_PID!"
 if not defined RUNNING_PID del /q "%PID_FILE%" >nul 2>&1
 exit /b 0
 
@@ -417,22 +419,22 @@ exit /b 0
 set "ACCESS_RUNNING_PID="
 if not exist "%ACCESS_PID_FILE%" exit /b 0
 set /p "CHECK_ACCESS_PID="<"%ACCESS_PID_FILE%"
-for /f "delims=" %%P in ('powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -Filter 'ProcessId=!CHECK_ACCESS_PID!'; if($p -and $p.Name -ieq 'pythonw.exe' -and $p.CommandLine -match 'access_watch\.pyw?') { 'yes' }" 2^>nul') do if /I "%%P"=="yes" set "ACCESS_RUNNING_PID=!CHECK_ACCESS_PID!"
+for /f "tokens=1" %%P in ('tasklist /FI "PID eq !CHECK_ACCESS_PID!" /NH 2^>nul') do if /I "%%P"=="pythonw.exe" set "ACCESS_RUNNING_PID=!CHECK_ACCESS_PID!"
 if not defined ACCESS_RUNNING_PID del /q "%ACCESS_PID_FILE%" >nul 2>&1
 exit /b 0
 
 :start_access_watch
 call :read_access_pid
 if defined ACCESS_RUNNING_PID exit /b 0
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '!PYTHONW_PATH!' -Verb RunAs -ArgumentList @('%SCRIPT_DIR%access_watch.pyw')"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '!PYTHONW_PATH!' -WorkingDirectory '%SCRIPT_DIR%' -Verb RunAs -ArgumentList @('""%SCRIPT_DIR%access_watch.pyw""')"
 if errorlevel 1 (
     echo ERROR: Could not launch the elevated access watcher.
     exit /b 1
 )
-timeout /t 2 /nobreak >nul
+timeout /t 5 /nobreak >nul
 call :read_access_pid
 if not defined ACCESS_RUNNING_PID (
-    echo ERROR: Access watcher did not start. Approve elevation and ensure pywin32 is installed.
+    echo ERROR: Access watcher did not remain running. Check %%LocalAppData%%\.dguard\guard.log and access_alerts.log.
     exit /b 1
 )
 exit /b 0
@@ -440,22 +442,25 @@ exit /b 0
 :stop_access_watch
 call :read_access_pid
 if not defined ACCESS_RUNNING_PID exit /b 0
-taskkill /PID !ACCESS_RUNNING_PID! /T >nul 2>&1
-for /L %%S in (1,1,6) do (
-    call :read_access_pid
-    if not defined ACCESS_RUNNING_PID exit /b 0
-    timeout /t 1 /nobreak >nul
-)
-echo Access watcher did not exit gracefully; forcing it to stop...
-call :read_access_pid
-if defined ACCESS_RUNNING_PID taskkill /PID !ACCESS_RUNNING_PID! /T /F >nul 2>&1
-for /L %%S in (1,1,6) do (
+rem The watcher has no vault-mutation shutdown work; force-stop it immediately
+rem so an elevated Security-log handle cannot keep the watcher alive.
+taskkill /PID !ACCESS_RUNNING_PID! /T /F >nul 2>&1
+for /L %%S in (1,1,5) do (
     call :read_access_pid
     if not defined ACCESS_RUNNING_PID exit /b 0
     timeout /t 1 /nobreak >nul
 )
 echo ERROR: Access watcher is still running. It was not reported as stopped.
 exit /b 1
+
+:reset_saved_setup
+if exist "%CONFIG_FILE%" (
+    del /q "%CONFIG_FILE%" >nul 2>&1
+    if exist "%CONFIG_FILE%" (
+        echo WARNING: Could not remove guard_config.json. The next run may open the control panel again.
+    ) else echo Saved setup removed. The next run will open the setup wizard.
+)
+exit /b 0
 
 :ask_yn
 set "%~2="
