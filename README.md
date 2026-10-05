@@ -1,170 +1,162 @@
 # TokenLatch
 
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#requirements) [![Status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#limitations) [![License: choose one](https://img.shields.io/badge/license-to%20be%20chosen-lightgrey.svg)](#license)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#requirements)
+[![Status](https://img.shields.io/badge/status-pre--release-orange.svg)](#limitations)
+[![License](https://img.shields.io/badge/license-choose%20one-lightgrey.svg)](#license)
 
-TokenLatch is a Windows defense-in-depth utility that moves Discord and
-selected browser session storage out of their normal locations while the apps
-are closed, restores it when they launch, and alerts locally and remotely if
-an unexpected process reads the live files. It is designed to reduce the
-attack window and improve time-to-detection—not to provide encryption or a
-guarantee against token theft.
+TokenLatch is a Windows defense-in-depth utility for reducing the time that
+Discord session storage remains exposed on disk. When Discord or a selected
+browser is closed, TokenLatch moves the relevant local storage into a fresh,
+randomly named vault. When the app starts, it restores the storage. A separate
+Windows Security-log watcher can alert locally and through ntfy.sh, a Discord
+webhook, or email when an unexpected process reads a live guarded path.
 
-## Disclaimer
+This project is intentionally defensive. It does not decrypt, extract, or
+upload session tokens.
 
-TokenLatch cannot prevent theft while a protected app is actively open and its
-session files are unlocked. The Event ID 4663 watcher is alert-only: a read
-may already have happened before notification. Do not run untrusted software,
-keep antivirus active, use unique passwords, and enable strong account
-security. Test this tool carefully before relying on it.
+## Important disclaimer
+
+TokenLatch is not a guarantee against account compromise. It cannot protect
+files while a guarded app is open, cannot block a read that already happened,
+and cannot stop malware that disables auditing, runs with sufficient
+privileges, reads process memory, or steals credentials elsewhere. Keep
+Windows Defender/antivirus enabled, install software only from sources you
+trust, use MFA, and test the tool before relying on it.
 
 ## Contents
 
-- [What it does](#what-it-does)
-- [What it does not do](#what-it-does-not-do)
+- [Features](#features)
+- [Limitations](#limitations)
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Usage](#usage)
-- [Configuration reference](#configuration-reference)
-- [How detection works](#how-detection-works)
+- [Setup and daily use](#setup-and-daily-use)
+- [Configuration](#configuration)
+- [Remote alerts](#remote-alerts)
+- [How it works](#how-it-works)
 - [Logs and recovery](#logs-and-recovery)
-- [Uninstalling and rollback](#uninstalling-and-rollback)
+- [Uninstall and rollback](#uninstall-and-rollback)
+- [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
 
-## What it does
+## Features
 
-TokenLatch has two complementary protections:
+- Discord desktop coverage for `discord.exe`, `discordptb.exe`, and
+  `discordcanary.exe`.
+- Optional browser coverage for Chrome, Edge, Brave, Firefox, Opera, Opera GX,
+  Vivaldi, Chromium, and Yandex Browser.
+- Chromium LevelDB coverage for each supported browser's **Default** profile.
+- Firefox coverage for the default profile's `webappsstore.sqlite` and
+  `storage` paths, discovered through `profiles.ini`.
+- Toggle-based browser selection in `setup.bat`; Discord is always guarded.
+- Random 24–32 character vault names generated with Python `secrets` for every
+  new lock cycle.
+- Current vault mappings protected with Windows DPAPI for the current Windows
+  user.
+- PID locks, stale-process detection, graceful stop, forced-stop fallback, and
+  startup recovery for interrupted moves.
+- Windows object-access auditing with Security Event ID 4663.
+- Local notification plus optional parallel ntfy, Discord webhook, and SMTP
+  email alerts.
+- Optional current-user logon tasks; audit/SACL setup and the elevated watcher
+  require UAC approval.
 
-1. **Closed-app storage locking.** Discord and selected browsers are polled.
-   When an owning app closes, its session storage is moved into a fresh,
-   randomly named vault folder. When the app launches, the storage is restored.
-2. **Live-file access alerting.** Windows object-access auditing generates
-   Security Event ID 4663 records for successful reads of the specifically
-   audited paths. TokenLatch alerts when the reading process is not the
-   expected Discord or browser executable.
+## Limitations
 
-Supported targets:
-
-| Target | Process | Protected storage |
-| --- | --- | --- |
-| Discord desktop | `discord.exe`, `discordptb.exe`, `discordcanary.exe` | `%AppData%\discord\Local Storage\leveldb` |
-| Chrome Default | `chrome.exe` | `%LocalAppData%\Google\Chrome\User Data\Default\Local Storage\leveldb` |
-| Edge Default | `msedge.exe` | `%LocalAppData%\Microsoft\Edge\User Data\Default\Local Storage\leveldb` |
-| Brave Default | `brave.exe` | `%LocalAppData%\BraveSoftware\Brave-Browser\User Data\Default\Local Storage\leveldb` |
-| Opera Stable Default | `opera.exe` | `%AppData%\Opera Software\Opera Stable\Local Storage\leveldb` |
-| Opera GX Default | `opera_gx.exe` | `%AppData%\Opera Software\Opera GX Stable\Local Storage\leveldb` |
-| Vivaldi Default | `vivaldi.exe` | `%LocalAppData%\Vivaldi\User Data\Default\Local Storage\leveldb` |
-| Chromium Default | `chromium.exe` | `%LocalAppData%\Chromium\User Data\Default\Local Storage\leveldb` |
-| Yandex Browser Default | `browser.exe` | `%LocalAppData%\Yandex\YandexBrowser\User Data\Default\Local Storage\leveldb` |
-| Firefox default profile | `firefox.exe` | `webappsstore.sqlite` and `storage`, found through `%AppData%\Mozilla\Firefox\profiles.ini` |
-
-Discord is always guarded. Browser coverage is selected in the setup wizard;
-Discord-only mode is supported. The current browser detector supports Chrome,
-Edge, Brave, Firefox, Opera, Opera GX, Vivaldi, Chromium, and Yandex Browser.
-Other browsers are not automatically detected or protected by this release.
-
-## What it does not do
-
-- It does not encrypt session files.
-- It does not block a process that reads files while Discord or a browser is
-  open. It reports unexpected reads after Windows auditing records them.
-- It cannot guarantee detection of malware that disables auditing, runs with
-  sufficient privileges, reads memory, or steals credentials elsewhere.
-- It covers only the Default profile for supported Chromium-based browsers.
-  Other browsers are currently not detected unless explicitly added to the
-  target mapping in the source.
-- Firefox support is newer and less battle-tested than Chromium LevelDB
-  handling. Multiple Firefox profiles require particular care.
-- There is a short race window during app launch and asynchronous event
-  delivery.
+- Storage is moved, not encrypted. A sufficiently privileged attacker can
+  inspect the running process, the vault, or the Windows account.
+- Protection is strongest while the owning app is completely closed. Discord
+  can leave background/tray processes alive; TokenLatch waits for all
+  configured process names to disappear.
+- The watcher is alert-only. Event 4663 is delivered after Windows records the
+  access; it cannot undo or block a read.
+- Object-access auditing is a global Windows audit-policy switch, although
+  TokenLatch applies SACLs only to selected storage paths. Other SACLs can
+  increase Security-log volume and disk writes.
+- Only the Default Chromium profile is covered. Additional profiles require
+  source changes.
+- Firefox storage locking is newer and less battle-tested than Chromium
+  LevelDB handling. Test it carefully, especially with multiple profiles.
+- There is a race window during application startup and asynchronous event
+  delivery. A malicious process may also disable auditing or bypass it with
+  sufficient privilege.
+- Only browsers listed in the setup menu are detected automatically.
 
 ## Requirements
 
 - Windows 10 or Windows 11.
-- Python 3.9 or newer with `pythonw.exe` available on `PATH`.
+- Python 3.9 or newer, with `pythonw.exe` available on `PATH`.
 - Python packages:
 
   ```powershell
-  pip install psutil pywin32 requests
+  python -m pip install psutil pywin32 requests
   ```
 
-Normal file guarding does not require administrator rights. The first audit
-setup and the elevated access watcher require administrator approval because
-they use the Security event log and SACLs.
+Normal guarding does not require administrator rights. One-time audit setup
+needs elevation to enable the `File System` audit subcategory and apply read
+SACLs. The access watcher is launched elevated so it can read the Security
+event log.
 
 ## Installation
 
 1. Clone or download this repository.
 2. Install the dependencies above.
-3. Ensure `guard_config.json` is not committed. The repository includes this
-   `.gitignore` entry:
+3. Confirm that `pythonw.exe` works from a new terminal:
 
-   ```gitignore
-   guard_config.json
+   ```powershell
+   where.exe pythonw.exe
    ```
 
-   The file can contain webhook URLs, ntfy topic URLs, and an SMTP app
-   password.
-4. Double-click `setup.bat`.
+4. Run `setup.bat` from this folder.
 
-The first run asks whether protection should be enabled, lets you toggle
-Chrome, Edge, Brave, and Firefox, configures remote alerts, and asks whether
-to start at Windows login. It then asks for one-time administrator approval
-to enable the Windows `File System` audit subcategory and apply read-audit
-SACLs to the selected paths.
+`guard_config.json` is created locally and is ignored by Git. It can contain
+webhook URLs, ntfy topic URLs, and an SMTP app password. Never commit it.
 
-## Usage
+## Setup and daily use
 
-### First-time setup
+### First run
 
-1. Start `setup.bat`.
-2. Confirm that TokenLatch should apply protection.
-3. Toggle the browser entries with `1`–`9`; `[X]` means selected. The current
-   entries are Chrome, Edge, Brave, Firefox, Opera, Opera GX, Vivaldi,
-   Chromium, and Yandex Browser. Enter `D` when done.
-4. Choose login auto-start, configure any combination of ntfy.sh, Discord
-   webhook, and email alerts, and decide whether to send a test alert.
-5. After all answers are collected, TokenLatch executes the setup in numbered
-   steps. It checks Discord variants and the selected browsers. If any are
-   open, it lists them and asks whether to close them. It first tries a graceful
-   `taskkill /T`, waits two seconds, then force-closes anything still running
-   with `/F`. Saying **N** cancels without changing processes or continuing.
-6. It saves the configuration, enables audit protection, sends the optional
-   test alert, registers login tasks, and starts the guard.
-7. If any execution step fails, TokenLatch displays the error and stops at
-   that step instead of continuing with a partial setup.
+`setup.bat` collects all answers before executing changes:
 
-### Later starts and stops
+1. Confirm that TokenLatch should be enabled.
+2. Toggle browser entries with their numbers. `[X]` means selected; enter `D`
+   when finished. Selecting no browser is allowed if you confirm Discord-only
+   mode.
+3. Choose whether to start at Windows logon.
+4. Configure any combination of the three remote alert channels.
+5. Optionally send a test alert.
+6. Confirm that TokenLatch may close currently running Discord/browser
+   processes. It tries a graceful close first, waits, then force-closes only
+   if necessary. Saying **N** cancels before setup/start.
+7. Approve the UAC prompt for the one-time audit/SACL setup.
 
-When `setup.bat` is run with an existing configuration, it becomes a control
-panel:
+The execution phase is numbered and stops at the first error. It does not
+continue to start background processes after a failed prerequisite.
 
-- If TokenLatch is running, it asks whether to stop the main guard and access
-  watcher.
-- Stopping waits for each Python process to exit, uses force termination only
-  as a fallback, and verifies the PID is gone before reporting success. If a
-  process cannot be stopped, the control panel reports an error and does not
-  pretend the vault is safe to manipulate.
-- If stopped, it asks whether to start protection.
-- Before every manual start, it reloads the saved browser list, checks Discord
-  and those browsers again, asks for confirmation, and performs graceful then
-  forceful closure if needed.
-- The PID locks are `%LocalAppData%\.dguard\guard.pid` and
-  `%LocalAppData%\.dguard\access_watch.pid`.
+### Control panel
 
-To rerun the wizard:
+Run `setup.bat` again after setup:
 
-```bat
-setup.bat --reconfigure
+- If the guard is running, it asks whether to stop it and the access watcher.
+- Stop waits for both Python processes to exit, force-terminates only as a
+  fallback, and verifies that their PIDs are gone before reporting success.
+- If the guard is stopped, it asks whether to start protection and repeats the
+  selected-app close check.
+- `setup.bat --reconfigure` reruns the wizard.
+
+Process locks are:
+
+```text
+%LocalAppData%\.dguard\guard.pid
+%LocalAppData%\.dguard\access_watch.pid
 ```
 
-The login tasks are current-user tasks. The access watcher task is configured
-with highest available privileges so it can read the Security log.
+Optional logon tasks are named `TokenLatch - Session Protection` and
+`TokenLatch - Access Watcher`.
 
-## Configuration reference
+## Configuration
 
-The wizard writes `guard_config.json` beside the scripts. Keep it private and
-out of version control. Its shape is:
+The wizard writes `guard_config.json` beside the scripts. A minimal example:
 
 ```json
 {
@@ -173,7 +165,7 @@ out of version control. Its shape is:
   "alerts": {
     "ntfy": {
       "enabled": true,
-      "topic_url": "https://ntfy.sh/replace-with-a-long-random-topic"
+      "topic_url": "https://ntfy.sh/use-a-long-random-topic"
     },
     "discord_webhook": {
       "enabled": false,
@@ -191,110 +183,86 @@ out of version control. Its shape is:
 }
 ```
 
-### Remote alert channels
+Treat this file as a secret. Topic and webhook URLs can be used by anyone who
+obtains them, and the SMTP app password must not be committed or shared.
 
-Channels are independent and are dispatched in parallel. Each request has a
-timeout; a failed network channel is logged and does not stop local alerting.
+## Remote alerts
 
-#### ntfy.sh — recommended
+Channels are independent. They are dispatched in parallel, have network
+timeouts, and cannot prevent the local notification from firing.
 
-Install the ntfy app, subscribe to a long random topic, then enter its URL in
-the wizard, such as `https://ntfy.sh/tokenlatch-<random-value>`. No account or
-API key is required. Anyone who knows the topic URL can read or publish to it,
-so treat it as a secret.
+### ntfy.sh (recommended)
 
-#### Discord webhook
+Install the ntfy mobile app, subscribe to a long random topic, and enter its
+URL, for example:
 
-Create a private Discord server/channel, open **Channel Settings →
-Integrations → Webhooks → New Webhook**, copy the URL, and enter it in the
-wizard. Anyone with the URL can post to that channel; never publish it.
+```text
+https://ntfy.sh/tokenlatch-<long-random-value>
+```
 
-#### Email
+No account or API key is required. Anyone who knows the topic can read or
+publish messages, so treat the URL like a password.
 
-Enter an SMTP server, port, sender, app password, and destination address. Port
-`587` uses STARTTLS; port `465` uses SMTP over SSL. For Gmail, generate and use
-an **App Password**, not the normal account password—Google generally blocks
-plain SMTP authentication with the main password.
+### Discord webhook
 
-## How detection works
+Create a private server/channel, open **Channel Settings → Integrations →
+Webhooks**, create a webhook, and paste its URL into the wizard. Anyone with
+the URL can post to the channel. Never publish it in GitHub.
 
-### Randomized DPAPI vault
+### Email
 
-Every new lock operation generates a new 24–32 character folder name using
-Python’s `secrets` module and moves storage directly beneath:
+Configure the SMTP host, port, sender, app password, and destination. Port
+`587` uses STARTTLS; port `465` uses SMTP over SSL. For Gmail, create a Google
+**App Password** and use that value—not the normal account password.
+
+## How it works
+
+### Closed-app storage lock
+
+The main guard polls configured process names approximately every 0.4 seconds.
+After a close grace period, it moves selected storage out of its normal path.
+When the owning process appears, it restores the storage immediately.
+
+The vault uses one random folder per active target under:
 
 ```text
 %LocalAppData%\.dguard\<random-name>\
 ```
 
-The predictable `vault\<target_name>` layout is not used. The current
-target-to-folder mapping is stored in `vault_state.bin`, encrypted with
-Windows DPAPI through `win32crypt.CryptProtectData`. This ties the state to
-the current Windows user account and prevents a copied state file from being
-useful on another account.
+The name is 24–32 characters from `a-z`, `A-Z`, and `0-9`, generated with
+`secrets`, not `random`. The mapping is stored in `vault_state.bin` protected
+with Windows DPAPI. DPAPI ties the state to the current Windows user account;
+copying the state file to another account does not make it readable.
 
-There is one active random folder per guarded target. For example, selecting
-Discord and Chrome normally produces two random folders at the same time;
-that is expected, not duplicate storage. The encrypted mapping identifies
-which folder belongs to which target.
+After a successful unlock, the mapping is cleared and the now-empty random
+folder is removed. On startup, inactive empty folders are cleaned up. A
+non-empty inactive folder is retained and logged because it may contain the
+only recoverable copy after an interrupted move. There is one active folder
+per target, so Discord and Chrome being locked at the same time normally means
+two random folders.
 
-After unlock, TokenLatch restores the files, clears the state entry, and
-removes the now-empty random folder. If the process crashes during a move, the
-next startup can use the encrypted mapping. If the state is missing or cannot
-be decrypted, a last-resort scan looks for random-name folders containing
-expected `leveldb`, `storage`, or `webappsstore.sqlite` entries and logs a
-warning. That fallback can be ambiguous when multiple browser vaults exist.
+If DPAPI state is unavailable, TokenLatch performs a warning-producing,
+last-resort scan for random folders containing expected storage names. This
+fallback can be ambiguous when multiple vaults exist; verify recovery before
+deleting anything.
 
-TokenLatch also performs a conservative stale-folder cleanup on startup. It
-automatically removes inactive random folders only when they are empty. A
-non-empty inactive folder is retained and a warning is written to `guard.log`,
-because it may be the only recoverable copy after an interrupted move. This is
-why an old-looking random folder may still be visible under `.dguard`: it is
-not disposable until its contents have been verified and restored. Never
-delete a non-empty folder or `vault_state.bin` while a recovery may still be
-needed.
+### Event ID 4663 access alerts
 
-The random folders remain under `.dguard` to keep permissions, logs, PIDs, and
-audit support in one directory instead of making random entries in the user
-profile root. This hides the reusable path pattern from published source code,
-but it is not a substitute for encryption: a capable attacker can still scan
-the filesystem or inspect the running process.
-
-### SACL and Event ID 4663
-
-During setup, `audit_setup.ps1` runs:
+The elevated `audit_setup.ps1` script enables:
 
 ```powershell
 auditpol /set /subcategory:"File System" /success:enable /failure:enable
 ```
 
-It then applies an Everyone/Read/Success `FileSystemAuditRule` recursively to
-the selected storage folders and Firefox storage files. The global audit
-subcategory switch enables the event pipeline, but TokenLatch adds SACLs only
-to its specific guarded paths. If other SACLs exist elsewhere, the Security
-log may see additional traffic and disk writes.
+It applies an Everyone/Read/Success SACL recursively to selected guarded
+paths. The watcher reads Security Event ID 4663, matches the object path,
+resolves process name/PID where possible, ignores expected owner processes,
+and alerts on unexpected reads. Sysmon is not used because its common file
+telemetry is focused on creation/deletion and is not a reliable plain-read
+detector for this use case.
 
-`access_watch.pyw` reads new Security Event ID 4663 records, matches their
-object paths against the current target paths, extracts `ProcessName` and
-`ProcessId`, and compares the process with the target’s expected executable
-allowlist. Sysmon is not used because its common file telemetry is focused on
-creation/deletion and is not a reliable plain-read detector for this purpose.
-
-After every unlock, the main guard attempts to reapply the SACL through
-`audit_setup.ps1` in case a move did not preserve the security descriptor.
-
-### Local and remote response
-
-Unexpected reads are written to:
-
-```text
-%LocalAppData%\.dguard\access_alerts.log
-```
-
-The user receives a local Windows notification and, if configured, parallel
-ntfy, Discord webhook, and email messages containing the process, PID,
-timestamp, target, object path, and a reminder to reset the Discord password or
-session token.
+After every unlock, the main guard attempts to reapply the SACL because a move
+may not preserve the security descriptor on every filesystem operation.
 
 ## Logs and recovery
 
@@ -303,42 +271,38 @@ session token.
 | Main guard log | `%LocalAppData%\.dguard\guard.log` |
 | Access alert log | `%LocalAppData%\.dguard\access_alerts.log` |
 | Encrypted vault state | `%LocalAppData%\.dguard\vault_state.bin` |
-| Main PID lock | `%LocalAppData%\.dguard\guard.pid` |
-| Access watcher PID lock | `%LocalAppData%\.dguard\access_watch.pid` |
+| Main PID | `%LocalAppData%\.dguard\guard.pid` |
+| Watcher PID | `%LocalAppData%\.dguard\access_watch.pid` |
 | Random vault root | `%LocalAppData%\.dguard\` |
 
-Storage is moved, not deleted. If an app cannot start, close it and inspect
-the log before manually restoring the relevant contents from the active random
-folder. Do not delete an active random folder or `vault_state.bin` until the
-storage has been recovered. If you intentionally confirm that an inactive
-folder contains no needed data, it can then be removed manually; TokenLatch
-will not silently delete non-empty vault data.
+If an app does not start, do not delete the random vault or
+`vault_state.bin`. Close the app, stop TokenLatch, inspect `guard.log`, and
+restore only after identifying the active target mapping. Non-empty inactive
+folders are intentionally not deleted automatically.
 
-## Uninstalling and rollback
+## Uninstall and rollback
 
-1. Run `setup.bat`, stop TokenLatch, and remove the two current-user scheduled
-   tasks, or run:
+1. Run `setup.bat` and stop TokenLatch. If necessary, remove the tasks:
 
    ```powershell
    schtasks /Delete /F /TN "TokenLatch - Session Protection"
    schtasks /Delete /F /TN "TokenLatch - Access Watcher"
    ```
 
-2. Disable the global audit-policy switch from an elevated PowerShell window:
+2. From an elevated PowerShell window, disable the global audit subcategory:
 
    ```powershell
    auditpol /set /subcategory:"File System" /success:disable /failure:disable
    ```
 
-3. Remove TokenLatch’s successful-read audit rules from the guarded paths. Run
-   this elevated PowerShell snippet with the actual paths selected on your
-   machine:
+3. Remove TokenLatch's Everyone/Success audit rules from the guarded paths.
+   Use the paths selected on your machine and review each change first:
 
    ```powershell
    $paths = @(
-     "$env:APPDATA\discord\Local Storage\leveldb"
+     "$env:APPDATA\discord\Local Storage\leveldb",
      "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Local Storage\leveldb"
-     # Add selected Edge, Brave, and Firefox paths here as applicable.
+     # Add selected Edge, Brave, Opera, Vivaldi, Chromium, Yandex, and Firefox paths.
    )
    $everyone = [System.Security.Principal.NTAccount]::new('Everyone')
    foreach ($path in $paths) {
@@ -357,20 +321,58 @@ will not silently delete non-empty vault data.
    }
    ```
 
-4. Confirm that Discord/browser storage is back in its normal location, then
-   remove the `.dguard` directory if no active vault or logs are needed.
-5. Remove `guard_config.json` manually if you want to delete saved alert
-   credentials and URLs.
+4. Confirm storage is back in its normal location. Only then remove
+   `%LocalAppData%\.dguard\` and local `guard_config.json` if you no longer
+   need logs or saved alert settings.
+
+Disabling the audit policy is system-wide. Removing TokenLatch's SACLs is
+path-specific; do not remove audit rules belonging to other software.
+
+## Troubleshooting
+
+### “Python was not found”
+
+Open a new terminal and run `where.exe pythonw.exe`. Install Python or repair
+`PATH`, then rerun `setup.bat`. The launcher resolves `pythonw.exe` through
+`PATH` for both start and scheduled-task registration.
+
+### Files did not move after closing Discord
+
+Check for remaining `Discord.exe`, `DiscordPTB.exe`, or
+`DiscordCanary.exe` processes, including tray/background processes. Then
+inspect `guard.log`. TokenLatch intentionally treats any matching process as
+open until the close grace period completes.
+
+### The control panel says a process is still running
+
+This is a safety failure, not a success state. Check both PID files and
+`guard.log`; close the process manually if needed, then run `setup.bat` again.
+
+### Alerts do not arrive
+
+Run the wizard's test-alert option. Check `access_alerts.log`, verify the URL
+or SMTP settings, and confirm that Windows File System auditing and the SACL
+exist on the selected paths.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please do not include real session data,
-webhook URLs, ntfy topics, SMTP credentials, or `guard_config.json` in bug
-reports or pull requests. Contributions should preserve the Windows-only
-scope and document any changes to the lock/unlock or audit behavior.
+Issues and pull requests are welcome. Do not include session storage, tokens,
+`guard_config.json`, SMTP credentials, ntfy topics, webhook URLs, or private
+Security-log exports in issues or pull requests. Contributions should preserve
+the Windows-only scope, fail safely, and include validation steps for changes
+to process lifecycle, vault recovery, auditing, or alert delivery.
+
+Before opening a pull request, run:
+
+```powershell
+python -m py_compile discord_guard.py discord_guard.pyw access_watch.py access_watch.pyw
+```
+
+Also confirm that the `.py` and `.pyw` pairs remain identical.
 
 ## License
 
-Choose and add a license before publishing this repository. Until then, treat
-the project as **all rights reserved** and do not assume permission to
-redistribute modified copies.
+Choose and add an explicit open-source license before publishing this project.
+Until a license file is committed, the repository should be treated as **all
+rights reserved**; GitHub visibility alone does not grant permission to copy,
+modify, or redistribute it.
