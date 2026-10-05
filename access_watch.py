@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 import smtplib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from discord_guard import (
 
 ACCESS_PID_FILE = Path(os.environ.get("LOCALAPPDATA", "")) / ".dguard" / "access_watch.pid"
 ACCESS_LOG_FILE = ACCESS_PID_FILE.parent / "access_alerts.log"
+STOP_FILE = ACCESS_PID_FILE.parent / "access_watch.stop"
 POLL_SECONDS = 1.0
 EVENT_QUERY = "*[System[(EventID=4663)]]"
 READ_ACCESS_MASK = 0x1 | 0x8 | 0x80 | 0x100 | 0x20000 | 0x80000000
@@ -50,6 +52,10 @@ if not log.handlers:
 
 def write_pid_file():
     ACCESS_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        STOP_FILE.unlink()
+    except FileNotFoundError:
+        pass
     pid_text = str(os.getpid())
     for _ in range(2):
         try:
@@ -248,11 +254,23 @@ def send_remote_alerts(message):
             if isinstance(alerts.get(name, {}), dict)
             and alerts.get(name, {}).get("enabled")
         }
+        results = {}
         for name, future in futures.items():
             try:
                 future.result(timeout=12)
+                results[name] = (True, "ok")
             except Exception as exc:
                 log.error("Remote %s alert failed: %s", name, exc)
+                results[name] = (False, str(exc))
+        return results
+
+
+def enabled_alert_names():
+    alerts = alert_config()
+    return [
+        name for name in ("ntfy", "discord_webhook", "email")
+        if isinstance(alerts.get(name), dict) and alerts[name].get("enabled")
+    ]
 
 
 def dispatch_remote_alerts(message):
@@ -305,8 +323,94 @@ def send_test_alert():
         "TokenLatch test alert: remote alert delivery is configured correctly.\n"
         f"Time: {datetime.datetime.now().astimezone().isoformat(timespec='seconds')}"
     )
-    send_remote_alerts(message)
-    print("Test alert dispatch completed; see access_alerts.log for channel results.")
+    names = enabled_alert_names()
+    if not names:
+        print("[SKIP] No remote alert channels are enabled.")
+        return 0
+    results = send_remote_alerts(message)
+    failed = 0
+    for name in names:
+        ok, detail = results.get(name, (False, "no result"))
+        print(f"[{'OK' if ok else 'FAIL'}] {name}: {detail}")
+        failed += not ok
+    print("Test message: TokenLatch diagnostic test alert")
+    return 1 if failed else 0
+
+
+def process_running(names):
+    wanted = {name.lower() for name in names}
+    found = set()
+    for proc in psutil.process_iter(attrs=["name"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            if name in wanted:
+                found.add(name)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+    return sorted(found)
+
+
+def pid_status(path):
+    try:
+        pid = int(path.read_text(encoding="ascii").strip())
+        alive = psutil.pid_exists(pid)
+        return f"PID {pid} ({'running' if alive else 'not running'})"
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return "not present"
+
+
+def run_diagnostics():
+    from discord_guard import CONFIG_FILE, GUARD_TARGETS, PID_FILE, selected_targets
+
+    print("=" * 64)
+    print("TokenLatch DIAGNOSTICS")
+    print("=" * 64)
+    print(f"Python: {sys.executable}")
+    for module in ("psutil", "pywin32", "requests"):
+        try:
+            if module == "pywin32":
+                import win32crypt, win32evtlog  # noqa: F401
+            else:
+                __import__(module)
+            print(f"[OK] Dependency: {module}")
+        except Exception as exc:
+            print(f"[FAIL] Dependency: {module}: {exc}")
+
+    print(f"[{'OK' if CONFIG_FILE.exists() else 'FAIL'}] Configuration: {CONFIG_FILE}")
+    targets = selected_targets()
+    for target in targets:
+        paths = target.get("paths", [target.get("path")])
+        for path in paths:
+            if path is None:
+                continue
+            print(f"[{'OK' if path.exists() else 'WARN'}] {target['name']}: {path}")
+
+    print(f"[INFO] Main guard: {pid_status(PID_FILE)}")
+    print(f"[INFO] Access watcher: {pid_status(ACCESS_PID_FILE)}")
+    print(f"[INFO] Discord processes: {', '.join(process_running({'discord.exe', 'discordptb.exe', 'discordcanary.exe'})) or 'none'}")
+    for target in targets:
+        if target["name"] == "discord_desktop":
+            continue
+        running = process_running(target["process_names"])
+        print(f"[INFO] {target['name']} processes: {', '.join(running) or 'none'}")
+
+    try:
+        audit = subprocess.run(
+            ['auditpol.exe', '/get', '/subcategory:File System'],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        enabled = "Success and Failure" in audit.stdout or "Success" in audit.stdout
+        print(f"[{'OK' if enabled else 'WARN'}] File System audit policy: {audit.stdout.strip() or audit.stderr.strip()}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[WARN] File System audit policy could not be queried: {exc}")
+
+    names = enabled_alert_names()
+    for name in ("ntfy", "discord_webhook", "email"):
+        print(f"[{'INFO' if name in names else 'SKIP'}] Alert channel: {name} ({'enabled' if name in names else 'disabled'})")
+    if names:
+        print("Sending diagnostic test alerts...")
+        return send_test_alert()
+    return 0
 
 
 def read_recent_events():
@@ -338,6 +442,13 @@ def main():
         first_pass = True
         log.info("TokenLatch access watcher starting; auditing %d target(s).", len(targets))
         while True:
+            if STOP_FILE.exists():
+                try:
+                    STOP_FILE.unlink()
+                except OSError:
+                    pass
+                log.info("TokenLatch access watcher received a stop request.")
+                break
             try:
                 events = read_recent_events()
                 for event in reversed(events):
@@ -364,6 +475,7 @@ if __name__ == "__main__":
     if os.name != "nt":
         raise SystemExit("This watcher is Windows-only.")
     if "--test" in sys.argv:
-        send_test_alert()
-        raise SystemExit(0)
+        raise SystemExit(send_test_alert())
+    if "--diagnose" in sys.argv:
+        raise SystemExit(run_diagnostics())
     main()

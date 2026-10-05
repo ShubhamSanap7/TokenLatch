@@ -13,6 +13,7 @@ for /f "delims=" %%P in ('where python.exe 2^>nul') do if not defined PYTHON_PAT
 set "PID_DIR=%LocalAppData%\.dguard"
 set "PID_FILE=%PID_DIR%\guard.pid"
 set "ACCESS_PID_FILE=%PID_DIR%\access_watch.pid"
+set "ACCESS_STOP_FILE=%PID_DIR%\access_watch.stop"
 set "TASK_NAME=%TOOL_NAME% - Session Protection"
 set "ACCESS_TASK_NAME=%TOOL_NAME% - Access Watcher"
 
@@ -173,7 +174,10 @@ if /I "!AUTOSTART!"=="Y" (
 
 echo [6/6] Starting TokenLatch...
 call :start_guard
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    call :remove_partial_setup
+    exit /b 1
+)
 echo.
 echo TokenLatch setup completed successfully.
 exit /b 0
@@ -343,7 +347,7 @@ exit /b 0
 set "RUNNING_PID="
 if not exist "%PID_FILE%" exit /b 0
 set /p "CHECK_PID="<"%PID_FILE%"
-for /f "tokens=1" %%P in ('tasklist /FI "PID eq !CHECK_PID!" /NH 2^>nul') do if /I "%%P"=="pythonw.exe" set "RUNNING_PID=!CHECK_PID!"
+for /f "delims=" %%P in ('powershell -NoProfile -InputFormat None -Command "$p=Get-Process -Id !CHECK_PID! -ErrorAction SilentlyContinue; if($p -and $p.ProcessName -ieq 'pythonw') { 'yes' }" 2^>nul') do if /I "%%P"=="yes" set "RUNNING_PID=!CHECK_PID!"
 if not defined RUNNING_PID del /q "%PID_FILE%" >nul 2>&1
 exit /b 0
 
@@ -354,7 +358,7 @@ if not defined PYTHONW_PATH (
     pause
     exit /b 1
 )
-start "" /b "!PYTHONW_PATH!" "%SCRIPT_DIR%discord_guard.pyw"
+powershell.exe -NoProfile -InputFormat None -ExecutionPolicy Bypass -Command "$p=Start-Process -FilePath '!PYTHONW_PATH!' -WorkingDirectory '%SCRIPT_DIR%' -WindowStyle Hidden -PassThru -ArgumentList @('""%SCRIPT_DIR%discord_guard.pyw""'); if(-not $p){exit 1}" >nul
 if errorlevel 1 (
     echo ERROR: Could not launch the main guard process.
     pause
@@ -376,6 +380,13 @@ if not defined RUNNING_PID (
     exit /b 1
 )
 echo %TOOL_NAME% is now protecting your session.
+exit /b 0
+
+:remove_partial_setup
+if exist "%CONFIG_FILE%" del /q "%CONFIG_FILE%" >nul 2>&1
+if exist "%CONFIG_FILE%" (
+    echo WARNING: Could not remove the partial configuration file.
+) else echo Partial setup removed. The next run will open the setup wizard.
 exit /b 0
 
 :stop_main_guard
@@ -419,7 +430,7 @@ exit /b 0
 set "ACCESS_RUNNING_PID="
 if not exist "%ACCESS_PID_FILE%" exit /b 0
 set /p "CHECK_ACCESS_PID="<"%ACCESS_PID_FILE%"
-for /f "tokens=1" %%P in ('tasklist /FI "PID eq !CHECK_ACCESS_PID!" /NH 2^>nul') do if /I "%%P"=="pythonw.exe" set "ACCESS_RUNNING_PID=!CHECK_ACCESS_PID!"
+for /f "delims=" %%P in ('powershell -NoProfile -InputFormat None -Command "$p=Get-Process -Id !CHECK_ACCESS_PID! -ErrorAction SilentlyContinue; if($p -and $p.ProcessName -ieq 'pythonw') { 'yes' }" 2^>nul') do if /I "%%P"=="yes" set "ACCESS_RUNNING_PID=!CHECK_ACCESS_PID!"
 if not defined ACCESS_RUNNING_PID del /q "%ACCESS_PID_FILE%" >nul 2>&1
 exit /b 0
 
@@ -442,9 +453,21 @@ exit /b 0
 :stop_access_watch
 call :read_access_pid
 if not defined ACCESS_RUNNING_PID exit /b 0
-rem The watcher has no vault-mutation shutdown work; force-stop it immediately
-rem so an elevated Security-log handle cannot keep the watcher alive.
-taskkill /PID !ACCESS_RUNNING_PID! /T /F >nul 2>&1
+rem Signal the elevated watcher through the user-writable .dguard directory.
+rem This avoids requiring UAC for the normal stop path.
+>"%ACCESS_STOP_FILE%" echo stop
+for /L %%S in (1,1,5) do (
+    call :read_access_pid
+    if not defined ACCESS_RUNNING_PID exit /b 0
+    timeout /t 1 /nobreak >nul
+)
+rem Last resort for a genuinely stuck watcher: request an elevated kill.
+echo Access watcher did not exit from its stop request; requesting elevation...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','Stop-Process -Id !ACCESS_RUNNING_PID! -Force -ErrorAction Stop'); exit [int]$p.ExitCode" >nul
+if errorlevel 1 (
+    echo ERROR: Windows denied the elevated access-watcher stop request.
+    exit /b 1
+)
 for /L %%S in (1,1,5) do (
     call :read_access_pid
     if not defined ACCESS_RUNNING_PID exit /b 0
